@@ -44,6 +44,11 @@ mkdir uploads processed
 npm start
 ```
 
+6. Probar la aplicacion de preferencia con Brave (consume menos recursos):
+```bash
+localhost:3000
+```
+
 ## Dependencias Principales
 
 ### Node.js (package.json)
@@ -54,6 +59,9 @@ npm start
 
 ### Python
 - rembg[gpu,cli] - Eliminación de fondos con soporte GPU
+
+
+ 
 
 
 ## Monitoreo de GPU
