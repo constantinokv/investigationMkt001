@@ -263,6 +263,20 @@
                         <div class="mb-4">
                             <h5><i class="fas fa-cut me-2"></i> Remover Fondo</h5>
                             <p>Elimina el fondo para destacar el producto</p>
+                            
+                            <!-- Agregar selector de servicio -->
+                            <div class="mb-3">
+                                <label for="bg-service" class="form-label">Servicio a utilizar</label>
+                                <select class="form-select mb-3" id="bg-service">
+                                    <option value="rembg">Rembg (Local - Gratis)</option>
+                                    <option value="azure">Azure Computer Vision (API)</option>
+                                    <option value="pixel">Pixel (AI Interno)</option>
+                                    
+                                </select>
+                            </div>
+                        
+                       
+                        
                             <button class="btn btn-primary w-100" id="remove-bg-btn">
                                 Quitar Fondo
                             </button>
@@ -301,27 +315,7 @@
                         <hr>
                         
                         <!-- Custom Background Section -->
-                        <div class="mb-4">
-                            <h5><i class="fas fa-image me-2"></i> Fondo Personalizado</h5>
-                            <p>Coloca tu producto sobre un fondo personalizado</p>
-                            
-                            <div class="custom-bg-container">
-                                <p class="mb-2">Selecciona o arrastra una imagen de fondo:</p>
-                                <div class="dropzone" id="bg-dropzone">
-                                    <i class="fas fa-image" style="font-size: 2rem; color: #4361ee;"></i>
-                                    <p class="small mt-2">Clic o arrastrar imagen de fondo</p>
-                                </div>
-                                <input type="file" id="bg-file-input" style="display: none;" accept="image/*">
-                                
-                                <div class="background-preview-container">
-                                    <img id="background-preview" alt="Vista previa del fondo">
-                                </div>
-                                
-                                <button class="btn btn-primary w-100 mt-3" id="apply-bg-btn" disabled>
-                                    Aplicar Fondo Personalizado
-                                </button>
-                            </div>
-                        </div>
+             
                     </div>
                 </div>
             </div>
@@ -349,8 +343,8 @@
             const fileInput = document.getElementById('file-input');
             const uploadBtn = document.getElementById('upload-btn');
             const dropzone = document.getElementById('dropzone');
-            const bgDropzone = document.getElementById('bg-dropzone');
-            const bgFileInput = document.getElementById('bg-file-input');
+           // const bgDropzone = document.getElementById('bg-dropzone');
+           // const bgFileInput = document.getElementById('bg-file-input');
             const welcomeSection = document.getElementById('welcome-section');
             const editorSection = document.getElementById('editor-section');
             const previewImage = document.getElementById('preview-image');
@@ -369,6 +363,12 @@
             const notificationToast = document.getElementById('notification-toast');
             const toastTitle = document.getElementById('toast-title');
             const toastMessage = document.getElementById('toast-message');
+            const serviceSelect = document.getElementById('bg-service');
+            if (serviceSelect) {
+                serviceSelect.addEventListener('change', function() {
+                    console.log('Servicio seleccionado:', this.value);
+                });
+            }
             
             // Bootstrap toast instance
             const toast = new bootstrap.Toast(notificationToast);
@@ -382,11 +382,11 @@
             // Event listeners
             uploadBtn.addEventListener('click', () => fileInput.click());
             dropzone.addEventListener('click', () => fileInput.click());
-            bgDropzone.addEventListener('click', () => bgFileInput.click());
+           // bgDropzone.addEventListener('click', () => bgFileInput.click());
             
             // File input change event
             fileInput.addEventListener('change', handleFileSelect);
-            bgFileInput.addEventListener('change', handleBgFileSelect);
+            //bgFileInput.addEventListener('change', handleBgFileSelect);
             
             // Button click events
             resetBtn.addEventListener('click', resetImage);
@@ -417,7 +417,7 @@
             });
             
             // Drag and drop for background image
-            bgDropzone.addEventListener('dragover', (e) => {
+           /* bgDropzone.addEventListener('dragover', (e) => {
                 e.preventDefault();
                 bgDropzone.classList.add('dragover');
             });
@@ -434,7 +434,7 @@
                     bgFileInput.files = e.dataTransfer.files;
                     handleBgFileSelect({ target: bgFileInput });
                 }
-            });
+            });*/
             
             // Functions
             function showLoading() {
@@ -551,38 +551,61 @@
                 try {
                     showLoading();
                     
+                    // Obtener el servicio seleccionado
+                    const selectedService = document.getElementById('bg-service').value;
+                    console.log('1. Servicio seleccionado:', selectedService);
+                
+                    
+                    const formData = new FormData();
+                    
                     // Convert data URL to File object
                     const blob = await fetch(currentImage).then(r => r.blob());
                     const file = new File([blob], "image.png", { type: "image/png" });
-                    
-                    const formData = new FormData();
                     formData.append('image', file);
+
+                    let endpoint = '/api/remove-background'; // Default para rembg
+                    let serviceName = 'Rembg';
+
+                
+
+                    // Determinar el endpoint basado en la selección
+                    if (selectedService === 'azure') {
+                        console.log('2. Detectado servicio Azure');
+                        endpoint = '/api/remove-background-azure';
+                        serviceName = 'Azure Computer Vision';
+                    }
+
+                    console.log('3. Llamando a endpoint:', endpoint);
                     
-                    // Call the API to remove background
-                    const response = await fetch('/api/remove-background', {
+                    // Llamar a la API
+                    const response = await fetch(endpoint, {
                         method: 'POST',
                         body: formData
                     });
                     
                     const data = await response.json();
+                    console.log('4. Respuesta recibida:', data);
                     
                     if (data.success) {
-                        // Fetch the processed image
                         const processedImageUrl = data.path;
-                        
-                        // Update current image
                         const absoluteUrl = window.location.origin + processedImageUrl;
                         currentImage = absoluteUrl;
                         previewImage.src = currentImage;
                         
-                        // Add to history
+                        // Agregar a historial
                         imageHistory.push({
-                            label: 'Sin Fondo',
-                            url: currentImage
+                            label: `Sin Fondo (${serviceName})`,
+                            url: currentImage,
+                            timestamp: new Date().toISOString()
                         });
                         updateImageHistory();
                         
-                        showNotification('Éxito', 'Fondo removido correctamente');
+                        showNotification('Éxito', `Fondo removido correctamente usando ${serviceName}`);
+
+                        if (data.processTime) {
+                            console.log('5. Tiempo de procesamiento:', data.processTime);
+                            showNotification('Info', `Tiempo de procesamiento: ${data.processTime}`);
+                        }
                     } else {
                         throw new Error(data.error || 'Error al procesar la imagen');
                     }
@@ -733,5 +756,7 @@
             }
         });
     </script>
+    <script src="/js/main.js"></script>
+     
 </body>
 </html>

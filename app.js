@@ -6,11 +6,16 @@ const multer = require('multer');
 const sharp = require('sharp');
 const path = require('path');
 const cors = require('cors');
-const axios = require('axios');
+//const axios = require('axios');
 const winston = require('winston');
 const fs = require('fs-extra');
 const { exec } = require('child_process');
 const ipStats = new Map();
+const FormData = require('form-data');
+const fetch = require('node-fetch');
+
+
+
 
 
 
@@ -183,145 +188,491 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
   });
 });
 
+
+// Función helper para medir rendimiento
+const measurePerformance = (startTime) => {
+  const endTime = Date.now();
+  return {
+      totalTime: endTime - startTime,
+      timestamp: new Date().toISOString()
+  };
+};
+
+ 
+ 
+
+// Configuración de Azure Computer Vision
+const AZURE_CONFIG = {
+  endpoint: 'https://vision-background.cognitiveservices.azure.com',
+  key: 'GJIyxNvP9HaZSE6Q1RSslvLYgEdfG26h5rHnGYJynMbOQ56XlSrQJQQJ99BCACYeBjFXJ3w3AAAFACOGSbzP'
+};
+
+app.post('/api/remove-background-azure', upload.single('image'), async (req, res) => {
+  const startTime = Date.now();
+  const requestId = Date.now().toString();
+  let outputPath;
+
+  try {
+      if (!req.file) {
+          return res.status(400).json({ error: 'No se ha subido ninguna imagen' });
+      }
+
+      logger.info('Iniciando proceso Azure Computer Vision', {
+          requestId,
+          fileName: req.file.originalname,
+          fileSize: req.file.size,
+          mimeType: req.file.mimetype
+      });
+
+      // Normalizar la imagen a PNG usando Sharp
+      let imageBuffer;
+      try {
+          imageBuffer = await sharp(req.file.buffer)
+              .toFormat('png')
+              .toBuffer();
+          
+          logger.info('Imagen normalizada a PNG', {
+              requestId,
+              originalSize: req.file.buffer.length,
+              normalizedSize: imageBuffer.length
+          });
+      } catch (sharpError) {
+          logger.error('Error al normalizar imagen', {
+              requestId,
+              error: sharpError.message
+          });
+          throw new Error('Error al procesar el formato de la imagen');
+      }
+
+      // URL actualizada según documentación oficial de Azure
+      const apiUrl = `${AZURE_CONFIG.endpoint}/computervision/imageanalysis:segment?api-version=2023-02-01-preview&mode=backgroundRemoval`;
+
+      logger.info('Configuración de llamada a Azure', {
+          requestId,
+          url: apiUrl
+      });
+
+      // Llamada REST directa usando fetch
+      const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+              'Content-Type': 'application/octet-stream',
+              'Ocp-Apim-Subscription-Key': AZURE_CONFIG.key
+          },
+          body: imageBuffer
+      });
+
+      if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Error en Azure API: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+
+      // Verificar que la respuesta es una imagen PNG
+      const contentType = response.headers.get('content-type');
+      if (contentType !== 'image/png') {
+          throw new Error(`Respuesta inesperada de Azure: ${contentType}`);
+      }
+
+      // Obtener el buffer de la imagen resultante
+      const resultBuffer = await response.arrayBuffer();
+
+      // Guardar la imagen resultante
+      const outputFilename = `azure-${requestId}.png`;
+      outputPath = path.join('processed', outputFilename);
+      
+      logger.info('Guardando imagen procesada', {
+          requestId,
+          outputPath,
+          responseSize: resultBuffer.byteLength,
+          contentType: contentType
+      });
+
+      await fs.writeFile(outputPath, Buffer.from(resultBuffer));
+
+      // Obtener información del archivo guardado
+      const fileStats = await fs.stat(outputPath);
+      const processTime = Date.now() - startTime;
+      const memoryUsage = process.memoryUsage();
+
+      // Log detallado del proceso completado
+      logger.info('Proceso Azure completado', {
+          requestId,
+          performance: {
+              processTimeMs: processTime,
+              memoryUsage: {
+                  heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024) + 'MB',
+                  external: Math.round(memoryUsage.external / 1024 / 1024) + 'MB',
+                  rss: Math.round(memoryUsage.rss / 1024 / 1024) + 'MB'
+              }
+          },
+          file: {
+              path: outputPath,
+              size: fileStats.size,
+              created: fileStats.birthtime,
+              sizeReduction: `${Math.round((req.file.size - fileStats.size) / req.file.size * 100)}%`
+          },
+          timing: {
+              started: new Date(startTime).toISOString(),
+              completed: new Date().toISOString(),
+              duration: `${processTime}ms`
+          },
+          azureApiVersion: '2023-02-01-preview'
+      });
+
+      res.json({
+          success: true,
+          path: `/processed/${outputFilename}`,
+          message: 'Fondo removido correctamente con Azure',
+          stats: {
+              processTime: `${processTime}ms`,
+              originalSize: req.file.size,
+              processedSize: fileStats.size,
+              reduction: `${Math.round((req.file.size - fileStats.size) / req.file.size * 100)}%`
+          }
+      });
+
+  } catch (error) {
+      const errorTime = Date.now();
+      logger.error('Error en proceso Azure', {
+          requestId,
+          timing: {
+              started: new Date(startTime).toISOString(),
+              error: new Date(errorTime).toISOString(),
+              duration: `${errorTime - startTime}ms`
+          },
+          error: {
+              message: error.message,
+              stack: error.stack,
+              name: error.name
+          },
+          request: {
+              fileName: req.file?.originalname,
+              fileSize: req.file?.size,
+              contentType: req.file?.mimetype
+          }
+      });
+
+      // Limpiar archivo temporal si existe
+      if (outputPath) {
+          try {
+              if (await fs.pathExists(outputPath)) {
+                  await fs.unlink(outputPath);
+                  logger.info('Archivo temporal eliminado después de error', {
+                      requestId,
+                      path: outputPath
+                  });
+              }
+          } catch (cleanupError) {
+              logger.warn('Error al limpiar archivo temporal', {
+                  requestId,
+                  error: cleanupError.message
+              });
+          }
+      }
+
+      res.status(500).json({
+          error: 'Error al procesar la imagen con Azure',
+          details: error.message,
+          requestId,
+          timestamp: new Date().toISOString()
+      });
+  }
+});
+
+
 // 1. Remover fondo de imagen
 app.post('/api/remove-background', upload.single('image'), async (req, res) => {
-    const startTime = Date.now();
-    const requestId = Date.now().toString();
+  const requestId = Date.now().toString();
+  const metrics = {
+      startTime: Date.now(),
+      imagePreprocess: 0,
+      backgroundRemoval: 0,
+      cleanup: 0,
+      memory: {
+          start: process.memoryUsage(),
+          end: null,
+          delta: null
+      }
+  };
 
-    try {
-        // Validar archivo
-        if (!req.file) {
-            logger.warn('Intento de procesamiento sin imagen', { requestId });
-            return res.status(400).json({ error: 'No se ha subido ninguna imagen' });
-        }
+  try {
+      // Validar archivo
+      if (!req.file) {
+          logger.warn('Intento de procesamiento sin imagen', { requestId });
+          return res.status(400).json({ error: 'No se ha subido ninguna imagen' });
+      }
 
-        // Logging información de la imagen
-        logger.info('Procesando imagen', {
-            requestId,
-            fileName: req.file.originalname,
-            fileSize: req.file.size,
-            mimeType: req.file.mimetype
-        });
+      // Logging información inicial
+      logger.info('Iniciando procesamiento', {
+          requestId,
+          fileName: req.file.originalname,
+          fileSize: req.file.size,
+          mimeType: req.file.mimetype,
+          startMemory: metrics.memory.start
+      });
 
-        // Crear directorios si no existen
-        await fs.ensureDir('uploads');
-        await fs.ensureDir('processed');
+      // Crear directorios si no existen
+      await fs.ensureDir('uploads');
+      await fs.ensureDir('processed');
 
-        const inputPath = path.join('uploads', `temp-${requestId}.png`);
-        const outputFilename = `nobg-${requestId}.png`;
-        const outputPath = path.join('processed', outputFilename);
+      const inputPath = path.join('uploads', `temp-${requestId}.png`);
+      const outputFilename = `nobg-${requestId}.png`;
+      const outputPath = path.join('processed', outputFilename);
 
-        // Guardar imagen temporal
-        try {
-            await sharp(req.file.buffer)
-                .png()
-                .toFile(inputPath);
-            logger.info('Imagen temporal guardada', { requestId, path: inputPath });
-        } catch (sharpError) {
-            logger.error('Error al procesar imagen con Sharp', {
-                requestId,
-                error: sharpError.message
-            });
-            throw new Error('Error al procesar la imagen inicial');
-        }
+      // Medir preprocesamiento con Sharp
+      const preprocessStart = Date.now();
+      try {
+          await sharp(req.file.buffer)
+              .png()
+              .toFile(inputPath);
+          metrics.imagePreprocess = Date.now() - preprocessStart;
+          logger.info('Preprocesamiento completado', { 
+              requestId, 
+              preprocessTime: metrics.imagePreprocess,
+              path: inputPath 
+          });
+      } catch (sharpError) {
+          logger.error('Error en preprocesamiento', {
+              requestId,
+              error: sharpError.message,
+              preprocessTime: Date.now() - preprocessStart
+          });
+          throw new Error('Error al procesar la imagen inicial');
+      }
 
-        // Ejecutar rembg con timeout
-        try {
-            await new Promise((resolve, reject) => {
-                const rembgProcess = exec(
-                    `rembg i "${inputPath}" "${outputPath}"`,
-                    { timeout: 30000 }, // 30 segundos timeout
-                    (error, stdout, stderr) => {
-                        if (error) {
-                            logger.error('Error en rembg', {
-                                requestId,
-                                error: error.message,
-                                stderr
-                            });
-                            reject(error);
-                        } else {
-                            logger.info('rembg ejecutado correctamente', {
-                                requestId,
-                                stdout: stdout || 'No output'
-                            });
-                            resolve();
-                        }
-                    }
-                );
+      // Ejecutar rembg con timeout y medición
+      const rembgStart = Date.now();
+      try {
+          await new Promise((resolve, reject) => {
+              const rembgProcess = exec(
+                  `rembg i "${inputPath}" "${outputPath}"`,
+                  { timeout: 30000 },
+                  (error, stdout, stderr) => {
+                      metrics.backgroundRemoval = Date.now() - rembgStart;
+                      if (error) {
+                          logger.error('Error en rembg', {
+                              requestId,
+                              error: error.message,
+                              stderr,
+                              rembgTime: metrics.backgroundRemoval
+                          });
+                          reject(error);
+                      } else {
+                          logger.info('rembg ejecutado correctamente', {
+                              requestId,
+                              rembgTime: metrics.backgroundRemoval,
+                              stdout: stdout || 'No output'
+                          });
+                          resolve();
+                      }
+                  }
+              );
 
-                // Monitorear uso de memoria
-                const startMemory = process.memoryUsage();
-                rembgProcess.on('close', () => {
-                    const endMemory = process.memoryUsage();
-                    logger.info('Uso de memoria', {
-                        requestId,
-                        memoryDelta: {
-                            heapUsed: endMemory.heapUsed - startMemory.heapUsed,
-                            external: endMemory.external - startMemory.external
-                        }
-                    });
-                });
-            });
-        } catch (rembgError) {
-            throw new Error(`Error en rembg: ${rembgError.message}`);
-        }
+              // Monitorear memoria durante rembg
+              rembgProcess.on('close', () => {
+                  metrics.memory.end = process.memoryUsage();
+                  metrics.memory.delta = {
+                      heapUsed: metrics.memory.end.heapUsed - metrics.memory.start.heapUsed,
+                      external: metrics.memory.end.external - metrics.memory.start.external,
+                      rss: metrics.memory.end.rss - metrics.memory.start.rss
+                  };
+                  
+                  logger.info('Métricas de memoria rembg', {
+                      requestId,
+                      memoryStart: metrics.memory.start,
+                      memoryEnd: metrics.memory.end,
+                      memoryDelta: metrics.memory.delta
+                  });
+              });
+          });
+      } catch (rembgError) {
+          throw new Error(`Error en rembg: ${rembgError.message}`);
+      }
 
-        // Verificar archivo de salida
-        if (!await fs.pathExists(outputPath)) {
-            throw new Error('El archivo de salida no fue generado');
-        }
+      // Verificar archivo de salida
+      if (!await fs.pathExists(outputPath)) {
+          throw new Error('El archivo de salida no fue generado');
+      }
 
-        // Limpiar archivo temporal
-        try {
-            await fs.unlink(inputPath);
-            logger.info('Archivo temporal eliminado', { requestId, path: inputPath });
-        } catch (unlinkError) {
-            logger.warn('No se pudo eliminar archivo temporal', {
-                requestId,
-                error: unlinkError.message
-            });
-        }
+      // Medir limpieza
+      const cleanupStart = Date.now();
+      try {
+          await fs.unlink(inputPath);
+          metrics.cleanup = Date.now() - cleanupStart;
+          logger.info('Limpieza completada', { 
+              requestId, 
+              cleanupTime: metrics.cleanup,
+              path: inputPath 
+          });
+      } catch (unlinkError) {
+          logger.warn('Error en limpieza', {
+              requestId,
+              error: unlinkError.message,
+              cleanupTime: Date.now() - cleanupStart
+          });
+      }
 
-        // Calcular tiempo total
-        const processTime = Date.now() - startTime;
-        logger.info('Proceso completado', {
-            requestId,
-            processTimeMs: processTime,
-            outputPath
-        });
+      // Calcular y registrar métricas finales
+      const totalTime = Date.now() - metrics.startTime;
+      const finalMetrics = {
+          requestId,
+          totalTime,
+          preprocessing: metrics.imagePreprocess,
+          backgroundRemoval: metrics.backgroundRemoval,
+          cleanup: metrics.cleanup,
+          memory: metrics.memory,
+          imageInfo: {
+              originalSize: req.file.size,
+              processedSize: (await fs.stat(outputPath)).size
+          }
+      };
 
-        res.json({
-            success: true,
-            path: `/processed/${outputFilename}`,
-            message: 'Fondo removido correctamente',
-            processTime: `${processTime}ms`
-        });
+      logger.info('Proceso completado', {
+          ...finalMetrics,
+          outputPath
+      });
 
-    } catch (error) {
-        logger.error('Error en el proceso', {
-            requestId,
-            error: error.message,
-            stack: error.stack
-        });
+      // Respuesta al cliente
+      res.json({
+          success: true,
+          path: `/processed/${outputFilename}`,
+          message: 'Fondo removido correctamente',
+          metrics: {
+              totalTime: `${totalTime}ms`,
+              preprocessing: `${metrics.imagePreprocess}ms`,
+              backgroundRemoval: `${metrics.backgroundRemoval}ms`,
+              cleanup: `${metrics.cleanup}ms`,
+              memoriaUsada: `${(metrics.memory.delta.heapUsed / 1024 / 1024).toFixed(2)}MB`
+          }
+      });
 
-        // Limpiar archivos en caso de error
-        try {
-            await fs.remove(inputPath);
-            await fs.remove(outputPath);
-        } catch (cleanupError) {
-            logger.error('Error en limpieza', {
-                requestId,
-                error: cleanupError.message
-            });
-        }
+  } catch (error) {
+      logger.error('Error en el proceso', {
+          requestId,
+          error: error.message,
+          stack: error.stack,
+          metrics: {
+              tiempoHastaError: Date.now() - metrics.startTime,
+              memoriaAlError: process.memoryUsage()
+          }
+      });
 
-        res.status(500).json({
-            error: 'Error al procesar la imagen',
-            details: error.message,
-            requestId
-        });
-    }
+      // Limpiar archivos en caso de error
+      try {
+          await fs.remove(inputPath);
+          await fs.remove(outputPath);
+      } catch (cleanupError) {
+          logger.error('Error en limpieza post-error', {
+              requestId,
+              error: cleanupError.message
+          });
+      }
+
+      res.status(500).json({
+          error: 'Error al procesar la imagen',
+          details: error.message,
+          requestId
+      });
+  }
 });
+
+//1.1 PhotoRoom
+// Configuración de PhotoRoom
+const PHOTOROOM_CONFIG = {
+  sandbox: {
+      apiKey: 'sandbox_faeaa2b206df9ba9fe5f25841a3186efc1462f65',
+      endpoint: 'https://image-api.photoroom.com/v2/edit' // Nueva URL
+  },
+  production: {
+      apiKey: 'faeaa2b206df9ba9fe5f25841a3186efc1462f65',
+      endpoint: 'https://image-api.photoroom.com/v2/edit' // Nueva URL
+  }
+};
+
+app.post('/api/remove-background-photoroom', upload.single('image'), async (req, res) => {
+  const startTime = Date.now();
+  const requestId = Date.now().toString();
+  const mode = req.body.mode || 'sandbox';
+
+  try {
+      logger.info('Iniciando proceso PhotoRoom', {
+          requestId,
+          mode,
+          fileName: req.file.originalname,
+          fileSize: req.file.size
+      });
+
+      const formData = new FormData();
+      // Cambio en el nombre del campo de 'image_file' a 'imageFile'
+      formData.append('imageFile', req.file.buffer, {
+          filename: req.file.originalname,
+          contentType: req.file.mimetype
+      });
+
+      logger.info('Llamando a API PhotoRoom', {
+          requestId,
+          endpoint: PHOTOROOM_CONFIG[mode].endpoint,
+          mode: mode
+      });
+
+      // Llamada a PhotoRoom API con los nuevos headers
+      const response = await fetch(PHOTOROOM_CONFIG[mode].endpoint, {
+          method: 'POST',
+          headers: {
+              'x-api-key': PHOTOROOM_CONFIG[mode].apiKey,
+              'pr-background-removal-model-version': '2024-09-26' // Usando el modelo más reciente
+          },
+          body: formData
+      });
+
+      if (!response.ok) {
+          const errorText = await response.text();
+          logger.error('Error en respuesta de PhotoRoom', {
+              requestId,
+              status: response.status,
+              statusText: response.statusText,
+              errorBody: errorText
+          });
+          throw new Error(`Error en PhotoRoom API: ${response.status} - ${errorText}`);
+      }
+
+      const buffer = await response.buffer();
+      const outputFilename = `photoroom-${requestId}.png`;
+      const outputPath = path.join('processed', outputFilename);
+
+      await fs.writeFile(outputPath, buffer);
+
+      const processTime = Date.now() - startTime;
+      logger.info('Proceso PhotoRoom completado', {
+          requestId,
+          processTimeMs: processTime,
+          outputPath,
+          remainingCredits: response.headers.get('x-credits-remaining')
+      });
+
+      res.json({
+          success: true,
+          path: `/processed/${outputFilename}`,
+          message: 'Fondo removido correctamente con PhotoRoom',
+          processTime: `${processTime}ms`,
+          remainingCredits: response.headers.get('x-credits-remaining'),
+          modelVersion: '2024-09-26'
+      });
+
+  } catch (error) {
+      logger.error('Error en proceso PhotoRoom', {
+          requestId,
+          error: error.message
+      });
+
+      res.status(500).json({
+          error: 'Error al procesar la imagen con PhotoRoom',
+          details: error.message,
+          requestId
+      });
+  }
+});
+
 
 // 2. Redimensionar imagen
 app.post('/api/resize', upload.single('image'), async (req, res) => {
@@ -695,6 +1046,53 @@ app.post('/api/batch-process', upload.array('images', 10), async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// Endpoint para estadísticas (debe ir antes de app.listen)
+app.get('/stats', async (req, res) => {
+  try {
+      // Verificar si el archivo de logs existe
+      if (!await fs.pathExists('combined.log')) {
+          return res.send(`
+              <html>
+              <head>
+                  <title>Estadísticas de Procesamiento</title>
+                  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+              </head>
+              <body>
+                  <div class="container mt-4">
+                      <div class="alert alert-warning">
+                          No hay datos de procesamiento disponibles aún.
+                          Procesa algunas imágenes primero.
+                      </div>
+                  </div>
+              </body>
+              </html>
+          `);
+      }
+
+      // ... resto del código del endpoint ...
+  } catch (error) {
+      console.error('Error al leer estadísticas:', error);
+      res.status(500).send(`
+          <html>
+          <head>
+              <title>Error</title>
+              <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+          </head>
+          <body>
+              <div class="container mt-4">
+                  <div class="alert alert-danger">
+                      Error al obtener estadísticas: ${error.message}
+                  </div>
+              </div>
+          </body>
+          </html>
+      `);
+  }
+});
+
+
+
 
 // Iniciar el servidor
 app.listen(PORT, () => {

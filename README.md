@@ -44,7 +44,7 @@ mkdir uploads processed
 npm start
 ```
 
-6. Probar la aplicacion de preferencia con Brave (consume menos recursos):
+7. Probar la aplicacion de preferencia con Brave (consume menos recursos):
 ```bash
 localhost:3000
 ```
